@@ -4,11 +4,9 @@
 
 ## 使用方式
 
-### 方式一：直接运行 exe（推荐）
+### 方式一：直接运行 exe
 
-双击 `启动服务.bat`，服务启动后访问 http://localhost:3000
-
-> 直接双击 `word-parser.exe` 也可以，但出错时窗口会立即关闭，建议用 `.bat` 启动。
+双击 `word-parser.exe`，服务启动后访问 http://localhost:3000
 
 ### 方式二：开发模式
 
@@ -23,7 +21,7 @@ npm run dev
 npm run pkg
 ```
 
-生成 `word-parser.exe`，将 `word-parser.exe` 和 `启动服务.bat` 放在同一目录即可分发。
+生成 `word-parser.exe`，双击即可运行。
 
 ## API 接口
 
