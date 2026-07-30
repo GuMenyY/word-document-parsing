@@ -1,7 +1,6 @@
 import express, { Express, Request, Response, NextFunction } from 'express'
 import cors from 'cors'
 import path from 'path'
-import fs from 'fs'
 import routes from './routes'
 
 const app: Express = express()
@@ -12,11 +11,13 @@ app.use(cors())
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 
-// 静态文件服务：优先读取 exe 同级的 public 目录，否则 fallback 到编译目录
-const exeDir = path.dirname(process.execPath)
-const publicDirCandidate = path.join(exeDir, 'public')
-const publicDirFallback = path.join(__dirname, '../public')
-const publicDir = fs.existsSync(publicDirCandidate) ? publicDirCandidate : publicDirFallback
+// 静态文件服务
+// - 打包为 exe 时：优先读 exe 同级的 public 目录
+// - Render / 普通 node 运行时：读编译目录旁的 public
+const isPkg = typeof (process as any).pkg !== 'undefined'
+const publicDir = isPkg
+  ? path.join(path.dirname(process.execPath), 'public')
+  : path.join(__dirname, '../public')
 app.use(express.static(publicDir))
 
 // 请求日志
@@ -28,21 +29,9 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 // 路由
 app.use('/api', routes)
 
-// 根路径
+// 根路径 → 返回前端页面
 app.get('/', (_req: Request, res: Response) => {
-  res.json({
-    success: true,
-    message: 'Word 文档解析服务',
-    version: '1.0.0',
-    endpoints: {
-      upload: 'POST /api/upload - 上传并解析 (异步)',
-      parse: 'POST /api/parse - 直接解析 (同步)',
-      result: 'GET /api/result/:id - 获取任务结果',
-      districts: 'GET /api/districts - 获取区域列表',
-      generate: 'POST /api/generate - 生成区域代码',
-      health: 'GET /api/health - 健康检查',
-    },
-  })
+  res.sendFile(path.join(publicDir, 'index.html'))
 })
 
 // 错误处理
