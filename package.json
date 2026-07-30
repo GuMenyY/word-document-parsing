@@ -1,0 +1,46 @@
+{
+  "name": "word-document-parsing",
+  "version": "1.0.0",
+  "description": "Word文档解析工具 - 将Word文档转换为富文本HTML格式",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "ts-node src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "pkg": "npm run build && pkg dist/server.js --targets node18-win-x64 --output word-parser.exe --assets public/**",
+    "test": "echo \"No tests yet\""
+  },
+  "keywords": [
+    "word",
+    "docx",
+    "parser",
+    "rich-text"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@types/jszip": "^3.4.0",
+    "@types/web": "^0.0.354",
+    "@xmldom/xmldom": "^0.9.10",
+    "cfb": "^1.2.2",
+    "cors": "^2.8.5",
+    "docx": "^8.5.0",
+    "express": "^4.18.2",
+    "iconv-lite": "^0.7.3",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.12.0",
+    "multer": "^1.4.5-lts.1",
+    "uuid": "^9.0.0",
+    "word-extractor": "^1.0.4"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.15",
+    "@types/express": "^4.17.21",
+    "@types/iconv-lite": "^0.0.1",
+    "@types/multer": "^1.4.11",
+    "@types/node": "^20.19.43",
+    "@types/uuid": "^9.0.7",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
