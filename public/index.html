@@ -409,31 +409,7 @@
       <button class="copy-btn" id="copyBtn">复制代码</button>
     </div>
 
-    <div class="endpoints">
-      <h3>API 接口</h3>
-      <div class="endpoint-list">
-        <div class="endpoint-item">
-          <span class="method method-post">POST</span>
-          <span class="endpoint-url">/api/upload</span>
-        </div>
-        <div class="endpoint-item">
-          <span class="method method-post">POST</span>
-          <span class="endpoint-url">/api/parse</span>
-        </div>
-        <div class="endpoint-item">
-          <span class="method method-get">GET</span>
-          <span class="endpoint-url">/api/result/:id</span>
-        </div>
-        <div class="endpoint-item">
-          <span class="method method-get">GET</span>
-          <span class="endpoint-url">/api/districts</span>
-        </div>
-        <div class="endpoint-item">
-          <span class="method method-post">POST</span>
-          <span class="endpoint-url">/api/generate</span>
-        </div>
-      </div>
-    </div>
+
   </div>
 
   <script>
@@ -458,7 +434,7 @@
       tab.addEventListener('click', () => {
         document.querySelectorAll('.result-tab').forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
-        
+
         if (tab.dataset.tab === 'preview') {
           previewContent.style.display = 'block';
           codeContent.style.display = 'none';
@@ -572,7 +548,7 @@
 
     function showResult(data) {
       resultArea.classList.add('show');
-      
+
       // 获取 HTML 内容
       let htmlContent = '';
       if (data.richText && data.richText.htmlContent) {
@@ -580,18 +556,18 @@
       } else if (data.result) {
         htmlContent = data.result.fullText || '';
       }
-      
+
       // 生成代码格式
       if (data.richText && data.richText.codeFormat) {
         currentCodeData = data.richText.codeFormat;
       } else {
         currentCodeData = "'" + htmlContent.replace(/'/g, "\\'") + "'";
       }
-      
+
       // 显示预览和代码
       previewContent.innerHTML = htmlContent;
       codeContent.textContent = currentCodeData;
-      
+
       // 默认显示预览
       document.querySelector('.result-tab[data-tab="preview"]').click();
     }
