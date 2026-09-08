@@ -317,6 +317,7 @@ export class WordParserService {
       let paragraphHtml = ''
       let hasContent = false
 
+      let firstContentHandled = false
       for (const fragment of paragraph.fragments) {
         if (!fragment.text) continue
         hasContent = true
@@ -324,6 +325,31 @@ export class WordParserService {
         let text = fragment.text
           .replace(/</g, '&lt;')
           .replace(/>/g, '&gt;')
+
+        // 段落开头的中文数字编号（如"一、"、"十二、"）自动加粗
+        // 仅在段落的第一个非空片段上处理一次，避免重复包裹
+        if (!firstContentHandled && text.trim().length > 0) {
+          firstContentHandled = true
+          // 匹配：一、二、...十、十一、十二、...二十、三十、
+          const chineseNumberMatch = text.match(/^([一二三四五六七八九十]{1,2}、)/)
+          if (chineseNumberMatch) {
+            const marker = chineseNumberMatch[1]
+            const rest = text.slice(marker.length)
+            let boldPart = `<strong>${marker}</strong>`
+            if (fragment.color) {
+              const colorHex = fragment.color.startsWith('#')
+                ? fragment.color.toUpperCase()
+                : ('#' + fragment.color).toUpperCase()
+              const isDefaultBlack = colorHex === '#000000' || colorHex === '#000'
+              if (!isDefaultBlack) {
+                boldPart = `<span style="color: ${colorHex};">${boldPart}</span>`
+              }
+            }
+            text = boldPart + rest
+            paragraphHtml += text
+            continue
+          }
+        }
 
         if (fragment.color) {
           const colorHex = fragment.color.startsWith('#')
