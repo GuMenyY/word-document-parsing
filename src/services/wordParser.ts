@@ -251,21 +251,35 @@ export class WordParserService {
   }
 
   /**
-   * 申请承诺书专用处理：从"1."开头的段落开始截取，
-   * 无编号的段落自动补上连续序号（如"4."），条款为纯文本、无任何样式。
+   * 申请承诺书专用处理：从"承诺：/承诺:"之后开始截取，
+   * 有编号的保证从1开始连续，无编号的在"本人"前面补上序号，
+   * 条款为纯文本、无任何样式。
    */
   private extractCommitmentSection(
     paragraphs: AppParagraph[]
   ): { title: undefined; paragraphs: AppParagraph[] } {
-    // 找到第一个以"1."开头的段落
-    const startIndex = paragraphs.findIndex(p =>
-      /^\s*1\s*[.．、]/.test(p.plainText || '')
+    // 找到"承诺：/承诺:"所在段，从它的下一段开始截取；
+    // 找不到时回退到原来的"从1.开始"逻辑
+    const promiseIndex = paragraphs.findIndex(p =>
+      /承诺\s*[:：]/.test(p.plainText || '')
     )
-    if (startIndex < 0) {
-      return { title: undefined, paragraphs }
+    let sliced: AppParagraph[]
+    if (promiseIndex >= 0) {
+      sliced = paragraphs.slice(promiseIndex + 1)
+      // "承诺："同段后面若还跟有实质内容，也作为第一条处理
+      const tail = (paragraphs[promiseIndex].plainText || '').split(/承诺\s*[:：]/)[1]?.trim()
+      if (tail) {
+        sliced = [{ ...paragraphs[promiseIndex], plainText: tail, fragments: [{ text: tail }] } as AppParagraph, ...sliced]
+      }
+    } else {
+      const startIndex = paragraphs.findIndex(p =>
+        /^\s*1\s*[.．、]/.test(p.plainText || '')
+      )
+      if (startIndex < 0) {
+        return { title: undefined, paragraphs }
+      }
+      sliced = paragraphs.slice(startIndex)
     }
-
-    const sliced = paragraphs.slice(startIndex)
     // 期望序号计数器：从1开始递增
     let expectedNum = 1
     const renumbered: AppParagraph[] = []
@@ -284,8 +298,12 @@ export class WordParserService {
         renumbered.push(this.rebuildParagraphWithNumber(p, newText))
         expectedNum++
       } else {
-        // 无编号：自动补上期望序号
-        renumbered.push(this.rebuildParagraphWithNumber(p, `${expectedNum}.${text}`))
+        // 无编号：在"本人"前面补上序号；找不到"本人"时直接加在段首
+        const benIndex = text.indexOf('本人')
+        const newText = benIndex >= 0
+          ? `${text.slice(0, benIndex)}${expectedNum}.${text.slice(benIndex)}`
+          : `${expectedNum}.${text}`
+        renumbered.push(this.rebuildParagraphWithNumber(p, newText))
         expectedNum++
       }
     }
