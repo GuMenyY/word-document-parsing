@@ -100,11 +100,12 @@ export class WordParserService {
       allParagraphs = this.parseDocumentXml(documentXml, relationshipsXml || '')
     }
 
-    const paragraphs = this.filterAfterUserNotice(allParagraphs)
+    const afterNotice = this.filterAfterUserNotice(allParagraphs)
+    const { title, paragraphs } = this.extractSpecialSection(afterNotice, originalName)
     const fullText = paragraphs.map(p => p.plainText).join('\n')
 
     return {
-      title: this.extractTitle(paragraphs),
+      title,
       paragraphs,
       fullText: fullText.trim(),
       meta: {
@@ -162,6 +163,151 @@ export class WordParserService {
       return paragraphs.slice(foundIndex + 1)
     }
     return paragraphs
+  }
+
+  /**
+   * 特殊文档统一入口：承诺书 / 审核流程说明等需要"去标题、去样式、
+   * 只保留正文纯文本"的文档走这里，其他文档保持原样。
+   */
+  private extractSpecialSection(
+    paragraphs: AppParagraph[],
+    fileName: string
+  ): { title: string | undefined; paragraphs: AppParagraph[] } {
+    if (this.isCommitmentDoc(paragraphs, fileName)) {
+      return this.extractCommitmentSection(paragraphs)
+    }
+    if (this.isReviewProcessDoc(paragraphs, fileName)) {
+      return this.extractReviewProcessSection(paragraphs)
+    }
+    return { title: this.extractTitle(paragraphs), paragraphs }
+  }
+
+  /** 是否为申请承诺书：内容识别为主、文件名识别为辅 */
+  private isCommitmentDoc(paragraphs: AppParagraph[], fileName: string): boolean {
+    if (fileName.includes('承诺书')) return true
+    return paragraphs.some(p => {
+      const t = p.plainText || ''
+      return t.includes('承诺书') || t.includes('郑重做出以下承诺') || t.includes('郑重承诺')
+    })
+  }
+
+  /** 是否为审核流程说明：内容识别为主、文件名识别为辅 */
+  private isReviewProcessDoc(paragraphs: AppParagraph[], fileName: string): boolean {
+    if (fileName.includes('审核流程说明')) return true
+    return paragraphs.some(p => (p.plainText || '').includes('审核流程说明'))
+  }
+
+  /**
+   * 审核流程说明专用处理：丢弃标题，只保留正文，
+   * 每段一行纯文本、去除一切文字样式。
+   */
+  private extractReviewProcessSection(
+    paragraphs: AppParagraph[]
+  ): { title: undefined; paragraphs: AppParagraph[] } {
+    // 找到标题段（"审核流程说明"），从它之后开始截取
+    const titleIndex = paragraphs.findIndex(p =>
+      (p.plainText || '').trim() === '审核流程说明'
+      || (p.plainText || '').includes('审核流程说明')
+    )
+    const sliced = titleIndex >= 0 ? paragraphs.slice(titleIndex + 1) : paragraphs
+
+    const cleaned: AppParagraph[] = []
+    for (const p of sliced) {
+      const text = (p.plainText || '').trim()
+      // 空段落直接跳过
+      if (!text) continue
+      // 签名落款段才停止截取（正文如"申请人对审核结果有异议的……"不受影响）
+      if (this.isSignatureLine(text)) break
+      // 标题残留（如重复出现的说明标题）跳过
+      if (text === '审核流程说明') continue
+      cleaned.push(this.toPlainParagraph(p, text))
+    }
+
+    return { title: undefined, paragraphs: cleaned }
+  }
+
+  /**
+   * 是否为签名落款段：只有"申请人/承诺人"后紧跟冒号、空白+短姓名、
+   * "日期/联系电话/身份证"后紧跟冒号时才算落款。
+   * 正文如"申请人对审核结果有异议的……"不受影响。
+   */
+  private isSignatureLine(text: string): boolean {
+    return /^(申请人|承诺人)\s*[:：]/.test(text)
+      || /^(申请人|承诺人)\s+\S{1,8}$/.test(text)
+      || /^(日期|联系电话|身份证)\s*[:：]/.test(text)
+  }
+
+  /**
+   * 把段落转为纯文本段落：去除加粗/颜色等一切文字样式，
+   * 每段就是一行干净文本。
+   */
+  private toPlainParagraph(source: AppParagraph, text: string): AppParagraph {
+    return {
+      ...source,
+      fragments: [{ text, bold: false, italic: false, underline: false }],
+      plainText: text,
+      style: undefined,
+    }
+  }
+
+  /**
+   * 申请承诺书专用处理：从"1."开头的段落开始截取，
+   * 无编号的段落自动补上连续序号（如"4."），条款为纯文本、无任何样式。
+   */
+  private extractCommitmentSection(
+    paragraphs: AppParagraph[]
+  ): { title: undefined; paragraphs: AppParagraph[] } {
+    // 找到第一个以"1."开头的段落
+    const startIndex = paragraphs.findIndex(p =>
+      /^\s*1\s*[.．、]/.test(p.plainText || '')
+    )
+    if (startIndex < 0) {
+      return { title: undefined, paragraphs }
+    }
+
+    const sliced = paragraphs.slice(startIndex)
+    // 期望序号计数器：从1开始递增
+    let expectedNum = 1
+    const renumbered: AppParagraph[] = []
+
+    for (const p of sliced) {
+      const text = (p.plainText || '').trim()
+      // 空段落直接跳过
+      if (!text) continue
+      // 签名落款段才停止截取（正文如"申请人对审核结果……"不受影响）
+      if (this.isSignatureLine(text)) break
+
+      const numMatch = text.match(/^\s*(\d+)\s*[.．、]\s*/)
+      if (numMatch) {
+        // 有编号：用期望序号重写，保证从1开始连续
+        const newText = `${expectedNum}.${text.slice(numMatch[0].length)}`
+        renumbered.push(this.rebuildParagraphWithNumber(p, newText))
+        expectedNum++
+      } else {
+        // 无编号：自动补上期望序号
+        renumbered.push(this.rebuildParagraphWithNumber(p, `${expectedNum}.${text}`))
+        expectedNum++
+      }
+    }
+
+    return {
+      // 承诺书不需要标题头，前面的标题/导语已丢弃，title 置空
+      title: undefined,
+      paragraphs: renumbered,
+    }
+  }
+
+  /**
+   * 用新的纯文本重建段落：承诺书条款不需要任何文字样式，
+   * 直接用无样式的纯文本片段，保证输出就是 "1.xxx" 这样的干净文本。
+   */
+  private rebuildParagraphWithNumber(source: AppParagraph, newText: string): AppParagraph {
+    return {
+      ...source,
+      fragments: [{ text: newText, bold: false, italic: false, underline: false }],
+      plainText: newText,
+      style: undefined,
+    }
   }
 
   private parseDocumentXml(documentXml: string, relationshipsXml: string): AppParagraph[] {
