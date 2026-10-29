@@ -14,6 +14,34 @@ import {
 
 const wordExtractor = new WordExtractor()
 
+/**
+ * 自动编号层级定义（来自 word/numbering.xml）
+ */
+interface NumberingLevel {
+  /** 起始值（w:start） */
+  start: number
+  /** 编号格式（decimal / chineseCounting / ...） */
+  numFmt: string
+  /** 编号模板，如 "%1、" */
+  lvlText: string
+  /** 编号与正文之间的分隔（nothing / space / tab） */
+  suff: string
+}
+
+/**
+ * 自动编号上下文：定义映射 + 计数器（按文档段落顺序推进）
+ */
+interface NumberingContext {
+  /** numId -> abstractNumId */
+  numToAbstract: Map<number, number>
+  /** abstractNumId -> (ilvl -> 层级定义) */
+  abstracts: Map<number, Map<number, NumberingLevel>>
+  /** numId -> (ilvl -> 起始值覆盖) */
+  startOverrides: Map<number, Map<number, number>>
+  /** `${numId}:${ilvl}` -> 当前计数值 */
+  counters: Map<string, number>
+}
+
 async function extractDocText(filePath: string): Promise<string> {
   try {
     const doc = await wordExtractor.extract(filePath)
@@ -97,7 +125,8 @@ export class WordParserService {
       }
 
       const relationshipsXml = await zip.file('word/_rels/document.xml.rels')?.async('string')
-      allParagraphs = this.parseDocumentXml(documentXml, relationshipsXml || '')
+      const numberingXml = await zip.file('word/numbering.xml')?.async('string')
+      allParagraphs = this.parseDocumentXml(documentXml, relationshipsXml || '', numberingXml || '')
     }
 
     const afterNotice = this.filterAfterUserNotice(allParagraphs)
@@ -127,7 +156,8 @@ export class WordParserService {
         const documentXml = await zip.file('word/document.xml')?.async('string')
         if (documentXml) {
           const relationshipsXml = await zip.file('word/_rels/document.xml.rels')?.async('string')
-          return this.parseDocumentXml(documentXml, relationshipsXml || '')
+          const numberingXml = await zip.file('word/numbering.xml')?.async('string')
+          return this.parseDocumentXml(documentXml, relationshipsXml || '', numberingXml || '')
         }
       }
 
@@ -328,16 +358,18 @@ export class WordParserService {
     }
   }
 
-  private parseDocumentXml(documentXml: string, relationshipsXml: string): AppParagraph[] {
+  private parseDocumentXml(documentXml: string, relationshipsXml: string, numberingXml = ''): AppParagraph[] {
     const paragraphs: AppParagraph[] = []
     const parser = new DOMParser()
     const doc = parser.parseFromString(documentXml, 'text/xml')
     const paraElements = doc.getElementsByTagName('w:p')
     const rels = this.parseRelationships(relationshipsXml)
+    // 自动编号上下文：按段落顺序推进计数器，把 Word 自动生成的序号还原出来
+    const numbering = this.parseNumbering(numberingXml)
 
     for (let i = 0; i < paraElements.length; i++) {
       const paraEl = paraElements[i] as unknown as XmlElement
-      paragraphs.push(this.parseParagraphElement(paraEl, rels))
+      paragraphs.push(this.parseParagraphElement(paraEl, rels, numbering))
     }
 
     return paragraphs
@@ -364,7 +396,7 @@ export class WordParserService {
     return rels
   }
 
-  private parseParagraphElement(paraEl: XmlElement, rels: Map<string, string>): AppParagraph {
+  private parseParagraphElement(paraEl: XmlElement, rels: Map<string, string>, numbering?: NumberingContext): AppParagraph {
     const fragments: RichTextFragment[] = []
 
     for (let i = 0; i < paraEl.getElementsByTagName('w:r').length; i++) {
@@ -393,6 +425,21 @@ export class WordParserService {
       const spacingEl = paraProps.getElementsByTagName('w:spacing')[0] as unknown as XmlElement | undefined
       const afterVal = spacingEl?.getAttribute('w:after')
       if (afterVal) spacingAfter = parseInt(afterVal, 10)
+
+      // 自动编号（w:numPr）：正文的 w:t 里没有序号文本，需要从 numbering.xml 还原
+      if (numbering && numbering.numToAbstract.size > 0) {
+        const numPrEl = paraProps.getElementsByTagName('w:numPr')[0] as unknown as XmlElement | undefined
+        if (numPrEl) {
+          const ilvlEl = numPrEl.getElementsByTagName('w:ilvl')[0] as unknown as XmlElement | undefined
+          const numIdEl = numPrEl.getElementsByTagName('w:numId')[0] as unknown as XmlElement | undefined
+          const ilvl = parseInt(ilvlEl?.getAttribute('w:val') || '0', 10)
+          const numId = parseInt(numIdEl?.getAttribute('w:val') || '-1', 10)
+          const label = this.resolveNumberLabel(numbering, numId, ilvl)
+          if (label && !this.hasManualNumberPrefix(fragments.map(f => f.text).join(''))) {
+            fragments.unshift({ text: label, bold: false, italic: false, underline: false })
+          }
+        }
+      }
     }
 
     return {
@@ -404,6 +451,199 @@ export class WordParserService {
         spacing: spacingAfter ? { after: spacingAfter } : undefined,
       },
     }
+  }
+
+  /**
+   * 解析 word/numbering.xml，建立 numId -> 编号定义的映射。
+   * 没有编号文件时返回空上下文，调用方按无自动编号处理。
+   */
+  private parseNumbering(numberingXml: string): NumberingContext {
+    const ctx: NumberingContext = {
+      numToAbstract: new Map(),
+      abstracts: new Map(),
+      startOverrides: new Map(),
+      counters: new Map(),
+    };
+    if (!numberingXml) return ctx;
+
+    try {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(numberingXml, 'text/xml');
+
+      const abstractEls = doc.getElementsByTagName('w:abstractNum');
+      for (let i = 0; i < abstractEls.length; i++) {
+        const absEl = abstractEls[i] as unknown as XmlElement;
+        const abstractId = parseInt(absEl.getAttribute('w:abstractNumId') || '-1', 10);
+        if (abstractId < 0) continue;
+        const levels = new Map<number, NumberingLevel>();
+        const lvlEls = absEl.getElementsByTagName('w:lvl');
+        for (let j = 0; j < lvlEls.length; j++) {
+          const lvlEl = lvlEls[j] as unknown as XmlElement;
+          const ilvl = parseInt(lvlEl.getAttribute('w:ilvl') || '0', 10);
+          const startEl = lvlEl.getElementsByTagName('w:start')[0] as unknown as XmlElement | undefined;
+          const fmtEl = lvlEl.getElementsByTagName('w:numFmt')[0] as unknown as XmlElement | undefined;
+          const textEl = lvlEl.getElementsByTagName('w:lvlText')[0] as unknown as XmlElement | undefined;
+          const suffEl = lvlEl.getElementsByTagName('w:suff')[0] as unknown as XmlElement | undefined;
+          levels.set(ilvl, {
+            start: parseInt(startEl?.getAttribute('w:val') || '1', 10),
+            numFmt: fmtEl?.getAttribute('w:val') || 'decimal',
+            lvlText: textEl?.getAttribute('w:val') || '%1.',
+            suff: suffEl?.getAttribute('w:val') || 'tab',
+          });
+        }
+        ctx.abstracts.set(abstractId, levels);
+      }
+
+      const numEls = doc.getElementsByTagName('w:num');
+      for (let i = 0; i < numEls.length; i++) {
+        const numEl = numEls[i] as unknown as XmlElement;
+        const numId = parseInt(numEl.getAttribute('w:numId') || '-1', 10);
+        const absEl = numEl.getElementsByTagName('w:abstractNumId')[0] as unknown as XmlElement | undefined;
+        const abstractId = parseInt(absEl?.getAttribute('w:val') || '-1', 10);
+        if (numId < 0 || abstractId < 0) continue;
+        ctx.numToAbstract.set(numId, abstractId);
+        const overrideEls = numEl.getElementsByTagName('w:lvlOverride');
+        for (let j = 0; j < overrideEls.length; j++) {
+          const ovEl = overrideEls[j] as unknown as XmlElement;
+          const ilvl = parseInt(ovEl.getAttribute('w:ilvl') || '0', 10);
+          const startEl = ovEl.getElementsByTagName('w:startOverride')[0] as unknown as XmlElement | undefined;
+          const startVal = parseInt(startEl?.getAttribute('w:val') || '', 10);
+          if (!Number.isNaN(startVal)) {
+            if (!ctx.startOverrides.has(numId)) ctx.startOverrides.set(numId, new Map());
+            ctx.startOverrides.get(numId)!.set(ilvl, startVal);
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('numbering.xml 解析失败，将忽略自动编号: ' + (error instanceof Error ? error.message : String(error)));
+    }
+
+    return ctx;
+  }
+
+  /**
+   * 根据 (numId, ilvl) 计算当前段落的自动编号文本，并推进计数器。
+   * 返回如 "二、"、"6、"；无法解析时返回空字符串。
+   */
+  private resolveNumberLabel(ctx: NumberingContext, numId: number, ilvl: number): string {
+    const abstractId = ctx.numToAbstract.get(numId);
+    if (abstractId === undefined) return '';
+    const levels = ctx.abstracts.get(abstractId);
+    if (!levels) return '';
+    const level = levels.get(ilvl) || levels.get(0);
+    if (!level) return '';
+
+    const key = numId + ':' + ilvl;
+    let current = ctx.counters.get(key);
+    if (current === undefined) {
+      const ov = ctx.startOverrides.get(numId)?.get(ilvl);
+      current = ov !== undefined ? ov : level.start;
+    }
+    ctx.counters.set(key, current + 1);
+    for (const k of [...ctx.counters.keys()]) {
+      const parts = k.split(':');
+      const kNum = Number(parts[0]);
+      const kLvl = Number(parts[1]);
+      if (kNum === numId && kLvl > ilvl) ctx.counters.delete(k);
+    }
+
+    const numText = this.formatNumber(current, level.numFmt);
+    let label = level.lvlText.split('%1').join(numText);
+    label = label.replace(/%[2-9]/g, '');
+    if (level.suff === 'space') label += ' ';
+    else if (level.suff === 'tab') label += '\t';
+    return label;
+  }
+
+  /**
+   * 段落正文是否已经带有手打编号前缀（如"一、"、"8."）。
+   * 有的话不再补自动编号，避免重复。
+   */
+  private hasManualNumberPrefix(text: string): boolean {
+    return /^[\s\t]*(?:\d+\s*[.．、]|[一二三四五六七八九十百千零〇]+\s*[、.．])/.test(text);
+  }
+
+  /** 按 Word 编号格式渲染数字，未知格式回退为阿拉伯数字。 */
+  private formatNumber(value: number, numFmt: string): string {
+    switch (numFmt) {
+      case 'decimal':
+      case 'decimalZero':
+        return String(value);
+      case 'upperLetter':
+        return this.toAlphaNumber(value, 'upper');
+      case 'lowerLetter':
+        return this.toAlphaNumber(value, 'lower');
+      case 'upperRoman':
+        return this.toRomanNumber(value).toUpperCase();
+      case 'lowerRoman':
+        return this.toRomanNumber(value).toLowerCase();
+      case 'chineseCounting':
+      case 'chineseCountingThousand':
+      case 'chineseLegalSimplified':
+      case 'chineseSimplified':
+        return this.toChineseNumber(value);
+      case 'none':
+        return '';
+      case 'bullet':
+        return '•';
+      default:
+        return String(value);
+    }
+  }
+
+  /** 阿拉伯数字 -> 中文计数（一..九十九…），0 返回"零" */
+  private toChineseNumber(value: number): string {
+    if (value <= 0) return '零';
+    const digits = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+    if (value < 10) return digits[value];
+    if (value < 20) return value === 10 ? '十' : '十' + digits[value - 10];
+    if (value < 100) {
+      const tens = Math.floor(value / 10);
+      const ones = value % 10;
+      return digits[tens] + '十' + (ones ? digits[ones] : '');
+    }
+    if (value < 1000) {
+      const hundreds = Math.floor(value / 100);
+      const rest = value % 100;
+      return digits[hundreds] + '百' + (rest ? this.toChineseNumber(rest) : '');
+    }
+    const thousands = Math.floor(value / 1000);
+    const rest = value % 1000;
+    return this.toChineseNumber(thousands) + '千' + (rest ? this.toChineseNumber(rest) : '');
+  }
+
+  /** 阿拉伯数字 -> 字母编号（1=A, 27=AA…） */
+  private toAlphaNumber(value: number, casing: 'upper' | 'lower'): string {
+    if (value <= 0) return String(value);
+    let result = '';
+    let n = value;
+    while (n > 0) {
+      n--;
+      result = String.fromCharCode((n % 26) + 65) + result;
+      n = Math.floor(n / 26);
+    }
+    return casing === 'lower' ? result.toLowerCase() : result;
+  }
+
+  /** 阿拉伯数字 -> 罗马数字 */
+  private toRomanNumber(value: number): string {
+    if (value <= 0) return String(value);
+    const table: Array<[number, string]> = [
+      [1000, 'm'], [900, 'cm'], [500, 'd'], [400, 'cd'],
+      [100, 'c'], [90, 'xc'], [50, 'l'], [40, 'xl'],
+      [10, 'x'], [9, 'ix'], [5, 'v'], [4, 'iv'], [1, 'i'],
+    ];
+    let result = '';
+    let n = value;
+    for (const pair of table) {
+      const v = pair[0];
+      const s = pair[1];
+      while (n >= v) {
+        result += s;
+        n -= v;
+      }
+    }
+    return result;
   }
 
   private parseRunElement(runEl: XmlElement): RichTextFragment {
@@ -490,12 +730,12 @@ export class WordParserService {
           .replace(/</g, '&lt;')
           .replace(/>/g, '&gt;')
 
-        // 段落开头的中文数字编号（如"一、"、"十二、"）自动加粗
+        // 段落开头的编号（如"一、"、"十二、"、"4、"）自动加粗
         // 仅在段落的第一个非空片段上处理一次，避免重复包裹
         if (!firstContentHandled && text.trim().length > 0) {
           firstContentHandled = true
-          // 匹配：一、二、...十、十一、十二、...二十、三十、
-          const chineseNumberMatch = text.match(/^([一二三四五六七八九十]{1,2}、)/)
+          // 匹配：中文数字（一、…、十二、…、二十一、…）或阿拉伯数字（1. / 1、/ 4、）
+          const chineseNumberMatch = text.match(/^([一二三四五六七八九十百千零〇两]{1,6}、|\d{1,3}[.．、])/)
           if (chineseNumberMatch) {
             const marker = chineseNumberMatch[1]
             const rest = text.slice(marker.length)
