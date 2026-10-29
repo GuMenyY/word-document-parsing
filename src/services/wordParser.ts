@@ -730,12 +730,12 @@ export class WordParserService {
           .replace(/</g, '&lt;')
           .replace(/>/g, '&gt;')
 
-        // 段落开头的编号（如"一、"、"十二、"、"4、"）自动加粗
+        // 段落开头的中文数字编号（如"一、"、"十二、"）自动加粗，阿拉伯数字不加粗
         // 仅在段落的第一个非空片段上处理一次，避免重复包裹
         if (!firstContentHandled && text.trim().length > 0) {
           firstContentHandled = true
-          // 匹配：中文数字（一、…、十二、…、二十一、…）或阿拉伯数字（1. / 1、/ 4、）
-          const chineseNumberMatch = text.match(/^([一二三四五六七八九十百千零〇两]{1,6}、|\d{1,3}[.．、])/)
+          // 匹配：中文数字（一、…、十二、…、二十一、…），不含阿拉伯数字
+          const chineseNumberMatch = text.match(/^([一二三四五六七八九十百千零〇两]{1,6}、)/)
           if (chineseNumberMatch) {
             const marker = chineseNumberMatch[1]
             const rest = text.slice(marker.length)
